@@ -1,94 +1,81 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import os
 
-# --- DEBUG: show filesystem ---
-st.sidebar.title("🛠️ Debug Info")
-st.sidebar.write("**CWD:**", os.getcwd())
-st.sidebar.write("**Files:**", os.listdir("."))
-
-# --- 1. Load Only the Available Data with Error Reporting ---
+# --- 1. Load Data ---
 @st.cache_data
 def load_data():
-    dfs = {}
-    for name, path in {
-        'overall_df': 'data/mw_overall.csv',
-        'style_df':   'data/style_based_features.csv'
-    }.items():
-        try:
-            dfs[name] = pd.read_csv(path)
-            st.sidebar.write(f"Loaded `{path}`: shape={dfs[name].shape}")
-        except Exception as e:
-            st.sidebar.error(f"Error loading `{path}`:\n{e}")
-            dfs[name] = pd.DataFrame()  # empty
-    return dfs['overall_df'], dfs['style_df']
+    overall = pd.read_csv('data/mw_overall.csv')
+    style   = pd.read_csv('data/style_based_features.csv')
+    return overall, style
 
 overall_df, style_df = load_data()
 
-# --- Bail early if nothing loaded ---
+# Bail if load failed
 if overall_df.empty and style_df.empty:
-    st.error("No data loaded. Check that your `data/` folder is in the repo and contains the two CSVs.")
+    st.error("No data loaded. Check that data/mw_overall.csv and data/style_based_features.csv exist.")
     st.stop()
-
-# --- 2. Sidebar Controls ---
-st.sidebar.header("Filters")
-teamA = st.sidebar.selectbox("Team A", overall_df['teamA'].unique() if not overall_df.empty else [])
-teamB = st.sidebar.selectbox("Team B", overall_df['teamB'].unique() if not overall_df.empty else [])
-players = style_df['player_name'].unique() if not style_df.empty else []
-selected_player = st.sidebar.selectbox("Player (Style Analysis)", players)
 
 st.title("🏏 Cricket Analytics (Limited Data)")
 
-# --- 3. Head‑to‑Head Team Comparison ---
-st.header("1. Head‑to‑Head: Wins by Series")
-if overall_df.empty:
-    st.write("No head‑to‑head data available.")
-else:
-    df_h2h = overall_df.query("teamA == @teamA and teamB == @teamB")
-    if df_h2h.empty:
-        st.write("No head‑to‑head rows for this pair.")
-    else:
-        fig_h2h = px.bar(
-            df_h2h,
-            x='series',
-            y=['winsA', 'winsB'],
-            barmode='group',
-            labels={'value':'Wins','series':'Series'},
-            title=f"{teamA} vs {teamB}"
-        )
-        st.plotly_chart(fig_h2h, use_container_width=True)
+# --- 2. Overall Batting Statistics ---
+st.header("1. Avg Runs Off Bat by Innings")
+df_inn = (
+    overall_df
+    .groupby('innings', as_index=False)
+    .agg(avg_runs=('runs_off_bat','mean'))
+)
+fig1 = px.bar(
+    df_inn,
+    x='innings', y='avg_runs',
+    labels={'innings':'Innings','avg_runs':'Avg Runs'},
+    title="Average Runs Off Bat per Innings"
+)
+st.plotly_chart(fig1, use_container_width=True)
 
-# --- 4. Style‑Based Feature Analysis ---
-st.header("2. Player Style Features")
-if style_df.empty:
-    st.write("No style‑feature data available.")
+st.header("2. Top 10 Teams by Avg Runs Off Bat")
+df_team = (
+    overall_df
+    .groupby('batting_team', as_index=False)
+    .agg(avg_runs=('runs_off_bat','mean'))
+    .sort_values('avg_runs', ascending=False)
+    .head(10)
+)
+fig2 = px.bar(
+    df_team,
+    x='batting_team', y='avg_runs',
+    labels={'batting_team':'Team','avg_runs':'Avg Runs'},
+    title="Top 10 Teams by Avg Runs Off Bat"
+)
+st.plotly_chart(fig2, use_container_width=True)
+
+# --- 3. Style‑Based Feature Analysis ---
+st.header("3. Player Style Profile")
+players = style_df['name'].unique()
+selected_player = st.selectbox("Select Player", players)
+
+df_player = style_df[style_df['name']==selected_player]
+if df_player.empty:
+    st.write("No style data for this player.")
 else:
-    df_style = style_df[style_df['player_name'] == selected_player]
-    if df_style.empty:
-        st.write("No style data for this player.")
+    # pick numeric feature columns
+    feat_cols = [c for c in df_player.columns if c not in ['match_id','name']]
+    selected_feats = st.multiselect(
+        "Features to plot", options=feat_cols, default=feat_cols[:5]
+    )
+    if not selected_feats:
+        st.info("Please select at least one feature.")
     else:
-        # Choose some columns automatically if user hasn't
-        style_cols = [c for c in style_df.columns if c not in ['player_name']]
-        selected_features = st.multiselect(
-            "Features to Plot",
-            options=style_cols,
-            default=style_cols[:5]
+        df_melt = df_player.melt(
+            id_vars=['name'],
+            value_vars=selected_feats,
+            var_name='feature',
+            value_name='value'
         )
-        if not selected_features:
-            st.write("Pick at least one feature.")
-        else:
-            df_plot = df_style.melt(
-                id_vars=['player_name'],
-                value_vars=selected_features,
-                var_name='feature',
-                value_name='value'
-            )
-            fig_style = px.bar(
-                df_plot,
-                x='feature',
-                y='value',
-                labels={'value':'Score','feature':'Style Feature'},
-                title=f"{selected_player} Style Profile"
-            )
-            st.plotly_chart(fig_style, use_container_width=True)
+        fig3 = px.bar(
+            df_melt,
+            x='feature', y='value',
+            labels={'feature':'Style Feature','value':'Value'},
+            title=f"{selected_player} Style Features"
+        )
+        st.plotly_chart(fig3, use_container_width=True)
