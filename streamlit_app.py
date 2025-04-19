@@ -3,14 +3,14 @@ import pandas as pd
 import pycountry
 import plotly.express as px
 import plotly.graph_objects as go
-from streamlit_plotly_events import plotly_events
+# Remove: from streamlit_plotly_events import plotly_events (No longer needed)
 from io import BytesIO
 import base64
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
 import warnings
-import json # For printing session state nicely
+import math # For calculating button columns
 
 # --- Configuration ---
 warnings.filterwarnings("ignore", message=".*Country name specification contains tokens.*")
@@ -24,47 +24,37 @@ COLOR_NOT_PLAYED = "#E0E0E0" # Lighter Grey
 S_KEY_OPPOSITION = "selected_opposition"
 S_KEY_PLAYER = "player"
 S_KEY_FORMAT = "format"
-S_KEY_MAP_DATA = "map_iso_to_name" # Store the mapping relevant to the current view
+# Remove: S_KEY_MAP_DATA (No longer needed for interaction logic)
+BUTTON_COLS = 5 # Number of columns for opponent buttons
 
-# --- Helper Functions --- (Assuming these are correct from previous version)
+# --- Helper Functions --- (Keep these as they are needed for map visualization)
 
-# @st.cache_data # Keep caching disabled for now
+# @st.cache_data # Re-enable caching later
 def load_data():
     """Loads, cleans, and pre-filters the cricket data."""
-    # st.write("DEBUG: Running load_data()")
     try:
         df = pd.read_csv("data/total_data.csv")
-        # Basic Cleaning
         numeric_cols = ['runs_scored', 'balls_faced', 'wickets_taken', 'balls_bowled', 'runs_conceded', 'bowled_done', 'lbw_done', 'player_out', 'fours_scored', 'sixes_scored']
         for col in numeric_cols: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         df['out_kind'] = df['out_kind'].fillna('not out')
-
-        # Filter for allowed formats
         df_filtered = df[df["match_type"].isin(ALLOWED_FORMATS)].copy()
-        if df_filtered.empty:
-             st.warning(f"No data found for allowed formats: {', '.join(ALLOWED_FORMATS)}")
-             return None
-
+        if df_filtered.empty: return None
         # Standardize opposition names
         df_filtered['opposition_team'] = df_filtered['opposition_team'].replace({
             'U.A.E.': 'United Arab Emirates', 'UAE': 'United Arab Emirates',
-            'P.N.G.': 'Papua New Guinea',
-            'USA': 'United States of America',
-            'West Indies Cricket Board': 'West Indies',
-            'England Lions': None, 'Ireland A': None,
+            'P.N.G.': 'Papua New Guinea', 'USA': 'United States of America',
+            'West Indies Cricket Board': 'West Indies', 'England Lions': None, 'Ireland A': None,
         }).str.strip()
         df_filtered.dropna(subset=['opposition_team'], inplace=True)
         return df_filtered
     except FileNotFoundError:
-        st.error("Fatal Error: `data/total_data.csv` not found.")
-        return None
+        st.error("Fatal Error: `data/total_data.csv` not found."); return None
     except Exception as e:
-        st.error(f"Fatal Error during data loading: {e}")
-        return None
+        st.error(f"Fatal Error during data loading: {e}"); return None
 
 def get_country_code(name, code_type='alpha_3'):
-    """Gets the ISO 3166-1 alpha-3 code for a country name."""
-    overrides_alpha3 = {
+    """Gets the ISO 3166-1 alpha-3 code."""
+    overrides_alpha3 = { # Use standardized names
         "United Arab Emirates": "ARE", "Scotland": "GBR", "United States of America": "USA",
         "Netherlands": "NLD", "England": "GBR", "Ireland": "IRL", "West Indies": "JAM",
         "Hong Kong": "HKG", "Papua New Guinea": "PNG", "Bermuda": "BMU", "Afghanistan": "AFG",
@@ -87,7 +77,7 @@ def get_country_code(name, code_type='alpha_3'):
         except LookupError: return None
     except Exception: return None
 
-# @st.cache_data # Keep caching disabled
+# @st.cache_data # Re-enable caching later
 def get_all_country_iso3():
     return {country.alpha_3 for country in pycountry.countries}
 
@@ -105,13 +95,11 @@ st.title("🏏 International Cricket Player Performance Analyzer")
 if S_KEY_PLAYER not in st.session_state: st.session_state[S_KEY_PLAYER] = None
 if S_KEY_FORMAT not in st.session_state: st.session_state[S_KEY_FORMAT] = None
 if S_KEY_OPPOSITION not in st.session_state: st.session_state[S_KEY_OPPOSITION] = None
-if S_KEY_MAP_DATA not in st.session_state: st.session_state[S_KEY_MAP_DATA] = {}
 
 # --- Load Data ---
 df_full = load_data()
 if df_full is None or df_full.empty:
-    st.error("Application cannot run without valid data.")
-    st.stop()
+    st.error("Application cannot run without valid data."); st.stop()
 
 # --- Sidebar Selections ---
 st.sidebar.header("Select Player and Format")
@@ -122,74 +110,42 @@ _player = st.sidebar.selectbox("Choose a Player", players, index=player_idx)
 _format = st.sidebar.radio("Select Format", ALLOWED_FORMATS, index=format_idx)
 
 # --- Detect Change & Update State ---
-rerun_for_sidebar_change = False
-if _player != st.session_state[S_KEY_PLAYER]:
+if _player != st.session_state[S_KEY_PLAYER] or _format != st.session_state[S_KEY_FORMAT]:
     st.session_state[S_KEY_PLAYER] = _player
-    st.session_state[S_KEY_OPPOSITION] = None; st.session_state[S_KEY_MAP_DATA] = {}
-    rerun_for_sidebar_change = True
-if _format != st.session_state[S_KEY_FORMAT]:
     st.session_state[S_KEY_FORMAT] = _format
-    st.session_state[S_KEY_OPPOSITION] = None; st.session_state[S_KEY_MAP_DATA] = {}
-    rerun_for_sidebar_change = True
-if rerun_for_sidebar_change: st.rerun() # Rerun NOW if sidebar changed
+    st.session_state[S_KEY_OPPOSITION] = None # Reset opposition on player/format change
+    st.rerun() # Rerun immediately to reflect changes
 
-# --- Filter Data (Use current state values) ---
+# --- Filter Data ---
 if not st.session_state[S_KEY_PLAYER] or not st.session_state[S_KEY_FORMAT]:
-     st.info("Please select a player and format in the sidebar.")
-     st.stop()
+     st.info("Please select a player and format in the sidebar."); st.stop()
 
 player_df = df_full[(df_full["name"] == st.session_state[S_KEY_PLAYER]) &
                       (df_full["match_type"] == st.session_state[S_KEY_FORMAT])].copy()
 
 if player_df.empty:
     st.warning(f"No data found for {st.session_state[S_KEY_PLAYER]} in {st.session_state[S_KEY_FORMAT]}.")
-    st.session_state[S_KEY_OPPOSITION] = None; st.session_state[S_KEY_MAP_DATA] = {}
-    st.stop()
+    st.session_state[S_KEY_OPPOSITION] = None; st.stop()
 
-# --- *** ADD ISO CODE COLUMN HERE *** ---
-# This needs to happen *after* filtering and *before* it's used anywhere else.
-# st.write(f"DEBUG: Adding 'iso_code' column to player_df (Shape before: {player_df.shape})")
+# --- Add ISO Code for Map Visualization ---
 player_df["iso_code"] = player_df["opposition_team"].apply(lambda x: get_country_code(x, 'alpha_3'))
-# st.write(f"DEBUG: 'iso_code' column added. Example values:\n{player_df['iso_code'].head()}")
 
-# --- Prepare Map Data (Only if needed or changed) ---
-if not st.session_state[S_KEY_MAP_DATA]: # Check if map data needs generation
-    # st.write("DEBUG: Generating map data...")
-    # **Critical:** Filter out rows where ISO code lookup failed BEFORE grouping
-    # Now use the 'iso_code' column which is guaranteed to exist
-    opp_stats = player_df.dropna(subset=['iso_code']).groupby(
-        ["opposition_team", "iso_code"], as_index=False
-    ).agg(Innings=('match_id', 'nunique'), TotalRuns=('runs_scored', 'sum'))
-    st.session_state[S_KEY_MAP_DATA] = opp_stats.set_index('iso_code')['opposition_team'].to_dict()
-    # st.sidebar.expander("DEBUG: Map ISO->Name Updated").json(st.session_state[S_KEY_MAP_DATA])
-
-# Use the stored mapping
-iso_to_opposition_map = st.session_state.get(S_KEY_MAP_DATA, {}) # Use .get for safety
-
-# --- Create World Map DataFrame ---
+# --- Prepare Data for Static Map Visualization ---
+iso_to_opposition_map = player_df.dropna(subset=['iso_code']).set_index('iso_code')['opposition_team'].to_dict()
 all_iso3_codes = get_all_country_iso3()
 world_df = pd.DataFrame(list(all_iso3_codes), columns=['iso_code'])
-
-# Aggregate data needed for the map directly from player_df (which now has iso_code)
-# Ensure we only aggregate rows with a valid ISO code that's in our map keys
 valid_map_isos = list(iso_to_opposition_map.keys())
-agg_data = player_df[player_df['iso_code'].isin(valid_map_isos)].groupby(
-    'iso_code', as_index=False
-    ).agg(
-        Innings=('match_id', 'nunique'),
-        TotalRuns=('runs_scored', 'sum')
-    )
-
+agg_data = player_df[player_df['iso_code'].isin(valid_map_isos)].groupby('iso_code', as_index=False).agg(
+    Innings=('match_id', 'nunique'), TotalRuns=('runs_scored', 'sum')
+)
 world_df = world_df.merge(agg_data, on='iso_code', how='left')
 world_df['PlayedAgainst'] = world_df['TotalRuns'].notna()
-# Use the centrally stored map for hover names
 world_df['HoverName'] = world_df['iso_code'].map(iso_to_opposition_map).fillna('N/A')
 world_df['TotalRuns'] = world_df['TotalRuns'].fillna(0).astype(int)
 world_df['Innings'] = world_df['Innings'].fillna(0).astype(int)
 
-# --- Create and Display Interactive Map ---
+# --- Display Static Map ---
 st.subheader(f"World Map: {st.session_state[S_KEY_PLAYER]}'s Opponents in {st.session_state[S_KEY_FORMAT]}")
-st.markdown("Click on a highlighted country on the map to view detailed stats below.")
 fig = px.choropleth(
     world_df, locations="iso_code", locationmode="ISO-3", color="PlayedAgainst",
     color_discrete_map={True: COLOR_PLAYED, False: COLOR_NOT_PLAYED}, hover_name="HoverName",
@@ -197,39 +153,45 @@ fig = px.choropleth(
 )
 fig.update_layout(showlegend=False, geo=dict(showframe=False, showcoastlines=False, projection_type='natural earth', bgcolor='rgba(0,0,0,0)', landcolor=COLOR_NOT_PLAYED, subunitcolor='rgba(255,255,255,0.5)'), margin={"r":0,"t":10,"l":0,"b":0}, coloraxis_showscale=False)
 fig.update_traces(marker_line_width=0.5, marker_line_color='white', selector=dict(type='choropleth'))
-map_key = f"map_click_{st.session_state[S_KEY_PLAYER]}_{st.session_state[S_KEY_FORMAT]}"
-selected_points = plotly_events(fig, click_event=True, hover_event=False, select_event=False, key=map_key)
+# Display the plotly chart statically
+st.plotly_chart(fig, use_container_width=True) # Removed plotly_events
 
-# --- Process Click Result and Update State ---
-rerun_needed_after_click = False
-if selected_points:
-    clicked_iso = selected_points[0].get('location')
-    if clicked_iso and isinstance(clicked_iso, str):
-        current_map = st.session_state.get(S_KEY_MAP_DATA, {}) # Use stored map
-        if clicked_iso in current_map:
-            clicked_opposition_name = current_map[clicked_iso]
-            if st.session_state[S_KEY_OPPOSITION] != clicked_opposition_name:
-                st.session_state[S_KEY_OPPOSITION] = clicked_opposition_name
-                rerun_needed_after_click = True
-        else: # Clicked outside mapped area
-            if st.session_state[S_KEY_OPPOSITION] is not None:
-                 st.session_state[S_KEY_OPPOSITION] = None
-                 rerun_needed_after_click = True
-if rerun_needed_after_click: st.rerun() # Rerun only if state changed due to click
-
-# --- Display Stats Based on Current Session State ---
+# --- Generate Buttons for Opponents ---
 st.markdown("---")
+st.subheader("Select Opponent to View Stats:")
+
+# Get unique, sorted list of opponents the player *actually* played against
+opponents_list = sorted(player_df['opposition_team'].unique())
+
+if not opponents_list:
+    st.warning("No opponents found in the data for this player/format combination.")
+else:
+    # Create columns for buttons
+    cols = st.columns(BUTTON_COLS)
+    for i, opponent_name in enumerate(opponents_list):
+        col_index = i % BUTTON_COLS
+        # Place button in the current column
+        # Use opponent name for button label and unique key
+        button_key = f"btn_{st.session_state[S_KEY_PLAYER]}_{st.session_state[S_KEY_FORMAT]}_{opponent_name.replace(' ', '_')}"
+        if cols[col_index].button(opponent_name, key=button_key, use_container_width=True):
+            # If a button is clicked, update the session state
+            st.session_state[S_KEY_OPPOSITION] = opponent_name
+            # No explicit rerun needed here, button click triggers it automatically
+
+# --- Display Stats Based on Button Selection (Session State) ---
 current_selection_for_stats = st.session_state[S_KEY_OPPOSITION]
+
 if current_selection_for_stats:
+    st.markdown("---") # Separator before stats
     st.subheader(f"Detailed Stats vs: {current_selection_for_stats}")
-    # Filter player_df (which reliably has 'iso_code')
+    # Filter player_df using the name from session state
     country_stats_df = player_df[player_df["opposition_team"] == current_selection_for_stats]
 
     if not country_stats_df.empty:
         player_team = country_stats_df["player_team"].iloc[0] if "player_team" in country_stats_df.columns else "N/A"
         st.markdown(f"#### {st.session_state[S_KEY_PLAYER]} ({player_team}) vs {current_selection_for_stats} ({st.session_state[S_KEY_FORMAT]})")
 
-        # --- Calculate Stats --- (Same calculations)
+        # --- Calculate Stats --- (Same as before)
         innings=country_stats_df.shape[0]; total_runs=int(country_stats_df["runs_scored"].sum()); total_balls_faced=int(country_stats_df["balls_faced"].sum()); outs=int(country_stats_df["player_out"].sum())
         batting_avg=total_runs/outs if outs > 0 else float('inf') if total_runs > 0 else 0.0; batting_strike_rate=(total_runs/total_balls_faced)*100 if total_balls_faced > 0 else 0.0
         fours=int(country_stats_df["fours_scored"].sum()); sixes=int(country_stats_df["sixes_scored"].sum()); total_wickets=int(country_stats_df["wickets_taken"].sum()); total_balls_bowled=int(country_stats_df["balls_bowled"].sum())
@@ -251,16 +213,18 @@ if current_selection_for_stats:
         st.subheader("Download"); col_btn3, col_btn4 = st.columns(2)
         csv_data = country_stats_df.to_csv(index=False).encode("utf-8"); csv_filename = f"{st.session_state[S_KEY_PLAYER]}_vs_{current_selection_for_stats}_{st.session_state[S_KEY_FORMAT]}_stats.csv".replace(" ", "_")
         with col_btn3: st.download_button("⬇️ CSV", csv_data, file_name=csv_filename, mime="text/csv")
-        pdf_text = f"""Player: {st.session_state[S_KEY_PLAYER]} vs {current_selection_for_stats} ({st.session_state[S_KEY_FORMAT]})\nRuns: {total_runs}, Bat Avg: {f"{batting_avg:.2f}" if batting_avg!=float('inf') else "N/A"}, Bat SR: {batting_strike_rate:.2f}\nWkts: {total_wickets}, Bowl Avg: {f"{bowling_avg:.2f}" if bowling_avg!=float('inf') else "N/A"}, Bowl Econ: {bowling_economy:.2f}\n"""
+        pdf_text = f"""Player: {st.session_state[S_KEY_PLAYER]} vs {current_selection_for_stats} ({st.session_state[S_KEY_FORMAT]})\nRuns: {total_runs}, Bat Avg: {f"{batting_avg:.2f}" if batting_avg!=float('inf') else "N/A"}, Bat SR: {batting_strike_rate:.2f}\nWkts: {total_wickets}, Bowl Avg: {f"{bowling_avg:.2f}" if bowling_avg!=float('inf') else "N/A"}, Bowl Econ: {bowling_economy:.2f}\n""" # Simplified
         pdf_bytes = export_pdf(pdf_text); b64 = base64.b64encode(pdf_bytes.read()).decode(); pdf_filename = f"{st.session_state[S_KEY_PLAYER]}_vs_{current_selection_for_stats}_{st.session_state[S_KEY_FORMAT]}_stats.pdf".replace(" ", "_"); href = f'<a href="data:application/pdf;base64,{b64}" download="{pdf_filename}" style="display: inline-block; padding: 0.375rem 0.75rem; font-size: 1rem; font-weight: 400; line-height: 1.5; color: #fff; background-color: #0069d9; border-color: #0062cc; text-align: center; vertical-align: middle; border: 1px solid transparent; border-radius: 0.25rem; text-decoration: none;">📄 PDF</a>'
         with col_btn4: st.markdown(href, unsafe_allow_html=True)
 
     else:
         st.error(f"Internal inconsistency: Could not filter stats for '{current_selection_for_stats}'.")
 else:
-    st.info("⬅️ Select player/format, then click a highlighted country on the map for stats.")
+    # Message shown when no button has been clicked yet for the current player/format
+    st.info("Select an opponent from the buttons above to view detailed statistics.")
 
-# --- Footer / Debug ---
+
+# --- Footer ---
 st.sidebar.markdown("---")
-st.sidebar.info("Data: `total_data.csv` | Map: `streamlit-plotly-events`")
+st.sidebar.info("Data source: `data/total_data.csv`")
 # with st.sidebar.expander("Current Session State"): st.json(st.session_state.to_dict())
