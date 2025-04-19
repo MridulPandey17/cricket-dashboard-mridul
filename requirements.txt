@@ -3,6 +3,4 @@ pandas
 plotly
 pycountry
 streamlit-plotly-events
-pycountry 
-countryflags 
-reportlab
+
